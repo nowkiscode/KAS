@@ -6,6 +6,7 @@
 //
 
 import SwiftUI
+import WebKit
 
 nonisolated struct CafeArticle: Identifiable, Codable, Sendable {
     var id = UUID()
@@ -51,6 +52,14 @@ struct ContentView: View {
     @State private var isLoading = false
     @State private var errorMessage = ""
     
+    // 네이버 로그인 세션 쿠키
+    @AppStorage("nid_aut") private var nidAut = ""
+    @AppStorage("nid_ses") private var nidSes = ""
+    @State private var isShowingLoginSheet = false
+
+    // 다운로드 매니저
+    @StateObject private var downloadManager = DownloadManager.shared
+    
     // menuId 필터링용 상태 변수들
     @State private var selectedMenuId: String? = nil
     
@@ -82,6 +91,26 @@ struct ContentView: View {
                 Text("현재 버전 : 0.2.0 (beta)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                
+                if !nidAut.isEmpty && !nidSes.isEmpty {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 8, height: 8)
+                        Text("네이버 로그인 세션 활성화됨 (멤버공개 검색 가능)")
+                            .font(.caption)
+                            .foregroundStyle(.green)
+                    }
+                } else {
+                    HStack(spacing: 4) {
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 8, height: 8)
+                        Text("네이버 로그인 비활성화됨 (전체공개 검색만 가능)")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
 
                 TextField("학생 이름 입력", text: $userName)
                     .textFieldStyle(.roundedBorder)
@@ -160,49 +189,159 @@ struct ContentView: View {
                     .frame(height: 35)
                 }
 
+                // 일괄 다운로드 버튼 및 진행 상태
+                if !searchResults.isEmpty {
+                    let isLoggedIn = !nidAut.isEmpty && !nidSes.isEmpty
+                    VStack(spacing: 6) {
+                        Button {
+                            downloadManager.resetBatch()
+                            downloadManager.downloadAll(
+                                articles: filteredSearchResults,
+                                studentName: userName.trimmingCharacters(in: .whitespacesAndNewlines),
+                                nidAut: nidAut, nidSes: nidSes
+                            )
+                        } label: {
+                            HStack {
+                                Image(systemName: "arrow.down.circle.fill")
+                                Text("첨부파일 모두 다운로드 (\(filteredSearchResults.count)개)")
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!isLoggedIn || downloadManager.batchStatus != .idle)
+
+                        if !isLoggedIn {
+                            Text("다운로드 기능은 네이버 로그인 후 사용 가능합니다")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        }
+
+                        switch downloadManager.batchStatus {
+                        case .fetchingInfo:
+                            ProgressView("첨부파일 정보 조회 중...")
+                                .font(.caption)
+                        case .downloading(let progress):
+                            VStack(spacing: 2) {
+                                ProgressView(value: progress)
+                                Text(String(format: "다운로드 중 %.0f%%", progress * 100))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        case .done(let count):
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                Text("\(count)개 게시글 처리 완료 — Finder에서 열림")
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                Button("초기화") { downloadManager.resetBatch() }
+                                    .font(.caption)
+                            }
+                        case .error(let msg):
+                            Text(msg)
+                                .font(.caption)
+                                .foregroundStyle(.red)
+                        case .idle:
+                            EmptyView()
+                        }
+                    }
+                }
+
                 // 4. 과제물 리스트 (기본 웹 브라우저 연결)
                 List(filteredSearchResults) { article in
                     if let url = URL(string: article.link) {
-                        Link(destination: url) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(cleanHTML(article.title))
-                                    .font(.headline)
-                                    .foregroundStyle(.blue)
+                        HStack(alignment: .top, spacing: 8) {
+                            Link(destination: url) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text(cleanHTML(article.title))
+                                        .font(.headline)
+                                        .foregroundStyle(.blue)
 
-                                HStack(spacing: 8) {
-                                    if let nickname = article.writerNickname {
-                                        Text(nickname)
-                                            .font(.caption)
-                                            .fontWeight(.medium)
-                                            .foregroundStyle(.secondary)
-                                    } else if let cafeName = article.cafeName {
-                                        Text(cafeName)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                                    HStack(spacing: 8) {
+                                        if let nickname = article.writerNickname {
+                                            Text(nickname)
+                                                .font(.caption)
+                                                .fontWeight(.medium)
+                                                .foregroundStyle(.secondary)
+                                        } else if let cafeName = article.cafeName {
+                                            Text(cafeName)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        
+                                        // 게시판 ID 뱃지 표시
+                                        if let menuId = article.menuId {
+                                            let boardName = menuIdMap[menuId] ?? "게시판 \(menuId)"
+                                            Text(boardName)
+                                                .font(.caption2)
+                                                .fontWeight(.semibold)
+                                                .padding(.horizontal, 6)
+                                                .padding(.vertical, 2)
+                                                .background(Color.blue.opacity(0.1))
+                                                .foregroundStyle(.blue)
+                                                .cornerRadius(4)
+                                        }
                                     }
-                                    
-                                    // 게시판 ID 뱃지 표시
-                                    if let menuId = article.menuId {
-                                        let boardName = menuIdMap[menuId] ?? "게시판 \(menuId)"
-                                        Text(boardName)
-                                            .font(.caption2)
-                                            .fontWeight(.semibold)
-                                            .padding(.horizontal, 6)
-                                            .padding(.vertical, 2)
-                                            .background(Color.blue.opacity(0.1))
-                                            .foregroundStyle(.blue)
-                                            .cornerRadius(4)
+
+                                    if let description = article.description {
+                                        Text(cleanHTML(description))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
                                     }
                                 }
+                                .padding(.vertical, 4)
+                            }
 
-                                if let description = article.description {
-                                    Text(cleanHTML(description))
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
+                            Spacer()
+
+                            // 개별 다운로드 버튼
+                            let status = downloadManager.statusByArticle[article.link] ?? .idle
+                            VStack {
+                                switch status {
+                                case .idle:
+                                    Button {
+                                        downloadManager.downloadArticle(
+                                            article,
+                                            studentName: userName.trimmingCharacters(in: .whitespacesAndNewlines),
+                                            nidAut: nidAut, nidSes: nidSes
+                                        )
+                                    } label: {
+                                        Image(systemName: "arrow.down.circle")
+                                            .font(.title2)
+                                            .foregroundStyle(nidAut.isEmpty ? .gray : .blue)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(nidAut.isEmpty || nidSes.isEmpty)
+                                case .fetchingInfo:
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                case .downloading(let p):
+                                    VStack(spacing: 2) {
+                                        ProgressView()
+                                            .progressViewStyle(.circular)
+                                            .scaleEffect(0.6)
+                                        Text(String(format: "%.0f%%", p * 100))
+                                            .font(.system(size: 8))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                case .done:
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundStyle(.green)
+                                        .font(.title2)
+                                        .onTapGesture {
+                                            downloadManager.resetArticle(link: article.link)
+                                        }
+                                case .error:
+                                    Image(systemName: "exclamationmark.circle.fill")
+                                        .foregroundStyle(.red)
+                                        .font(.title2)
+                                        .onTapGesture {
+                                            downloadManager.resetArticle(link: article.link)
+                                        }
                                 }
                             }
-                            .padding(.vertical, 4)
+                            .frame(width: 34)
                         }
                     }
                 }
@@ -212,6 +351,42 @@ struct ContentView: View {
             .navigationTitle("과제 관리 및 필터")
             .onAppear {
                 loadCafeMenuNames()
+            }
+            .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    if nidAut.isEmpty || nidSes.isEmpty {
+                        Button {
+                            isShowingLoginSheet = true
+                        } label: {
+                            HStack {
+                                Image(systemName: "person.crop.circle.badge.plus")
+                                Text("네이버 로그인")
+                            }
+                        }
+                    } else {
+                        Button(role: .destructive) {
+                            logoutNaver()
+                        } label: {
+                            HStack {
+                                Image(systemName: "person.crop.circle.badge.xmark")
+                                Text("로그아웃")
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: $isShowingLoginSheet) {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button("닫기") {
+                            isShowingLoginSheet = false
+                        }
+                        .padding()
+                    }
+                    NaverLoginWebView(isPresented: $isShowingLoginSheet, nidAut: $nidAut, nidSes: $nidSes)
+                }
+                .frame(minWidth: 450, minHeight: 650)
             }
         }
     }
@@ -232,6 +407,12 @@ struct ContentView: View {
         request.setValue("https://m.cafe.naver.com/kwdmd", forHTTPHeaderField: "Referer")
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         request.setValue("mobile", forHTTPHeaderField: "X-Cafe-Product")
+
+        // 네이버 로그인 세션 쿠키 주입
+        if !nidAut.isEmpty && !nidSes.isEmpty {
+            let cookieHeader = "NID_AUT=\(nidAut); NID_SES=\(nidSes)"
+            request.setValue(cookieHeader, forHTTPHeaderField: "Cookie")
+        }
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             guard let data = data, error == nil else {
@@ -373,6 +554,107 @@ struct ContentView: View {
                 self.menuIdMap = newMap
             }
         }.resume()
+    }
+
+    func logoutNaver() {
+        nidAut = ""
+        nidSes = ""
+        
+        let dataStore = WKWebsiteDataStore.default()
+        dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+            let naverRecords = records.filter { $0.displayName.contains("naver") }
+            dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: naverRecords) {
+                // Done
+            }
+        }
+    }
+}
+
+
+#if os(macOS)
+struct NaverLoginWebView: NSViewRepresentable {
+    @Binding var isPresented: Bool
+    @Binding var nidAut: String
+    @Binding var nidSes: String
+    
+    func makeNSView(context: Context) -> WKWebView {
+        return context.coordinator.makeWebView()
+    }
+    
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+}
+#else
+struct NaverLoginWebView: UIViewRepresentable {
+    @Binding var isPresented: Bool
+    @Binding var nidAut: String
+    @Binding var nidSes: String
+    
+    func makeUIView(context: Context) -> WKWebView {
+        return context.coordinator.makeWebView()
+    }
+    
+    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+}
+#endif
+
+extension NaverLoginWebView {
+    class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: NaverLoginWebView
+        
+        init(_ parent: NaverLoginWebView) {
+            self.parent = parent
+        }
+        
+        func makeWebView() -> WKWebView {
+            let webView = WKWebView()
+            webView.navigationDelegate = self
+            
+            // Delete existing cookies in the web view just in case to show clean login page
+            let dataStore = WKWebsiteDataStore.default()
+            dataStore.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
+                let naverRecords = records.filter { $0.displayName.contains("naver") }
+                dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), for: naverRecords) {
+                    if let url = URL(string: "https://nid.naver.com/nidlogin.login") {
+                        let request = URLRequest(url: url)
+                        DispatchQueue.main.async {
+                            webView.load(request)
+                        }
+                    }
+                }
+            }
+            
+            return webView
+        }
+        
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                var aut = ""
+                var ses = ""
+                for cookie in cookies {
+                    if cookie.name == "NID_AUT" {
+                        aut = cookie.value
+                    } else if cookie.name == "NID_SES" {
+                        ses = cookie.value
+                    }
+                }
+                
+                if !aut.isEmpty && !ses.isEmpty {
+                    DispatchQueue.main.async {
+                        self.parent.nidAut = aut
+                        self.parent.nidSes = ses
+                        self.parent.isPresented = false
+                    }
+                }
+            }
+        }
     }
 }
 

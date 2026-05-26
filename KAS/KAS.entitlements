@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- App Sandbox 활성화 -->
+    <key>com.apple.security.app-sandbox</key>
+    <true/>
+    <!-- 외부 네트워크(인터넷) 요청 허용 -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <!-- Downloads 폴더 읽기/쓰기 허용 -->
+    <key>com.apple.security.files.downloads.read-write</key>
+    <true/>
+</dict>
+</plist>
