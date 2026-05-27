@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>페이지를 찾을 수 없습니다 (404 오류)</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+	  background: #fff;
+      /*background-color: #f8f8f8;*/
+      color: #333;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+    }
+    .container {
+      text-align: center;
+      max-width: 1000px;
+      padding: 20px;
+      background: #fff;
+      border-radius: 8px;
+      /*box-shadow: 0 2px 8px rgba(0,0,0,0.1);*/
+    }
+    .logo {
+      display: block;
+      margin: 0 auto 20px;
+      max-width: 500px;
+    }
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 10px;
+    }
+	.tit_error{margin-bottom:33px;font-weight:normal;font-size:30px;line-height:1.3;letter-spacing:-3.5px;color: #222222;}
+	.emph_txt{color:#e30000}
+    p {
+      font-size: 1.1rem;
+      margin-bottom: 20px;
+    }
+    a.btn-home {
+      display: inline-block;
+      padding: 20px 40px;
+      background-color: #0059a4;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 40px;
+      transition: background-color 0.3s ease;
+	  font-weight:500;
+	  font-size:18px;
+    }
+    a.btn-home:hover {
+      background-color: #014f8c;
+    }
+    footer {
+      margin-top: 30px;
+      font-size: 0.9rem;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- 로고 이미지 경로 수정 -->
+    <img class="logo" src="/ErrorPages/error_img01.png" alt="사이트 로고" />
+    <h1 class="tit_error"><span class="emph_txt">404 – 페이지를 찾을 수 없습니다</span></h1>
+    <p>서비스 이용에 불편을 드려 죄송합니다.<br>
+
+찾으시려는 페이지는 주소를 잘못 입력하였거나 페이지 주소의 변경 또는 삭제등의 이유로 페이지를 찾을 수 없습니다.<br>
+입력하신 페이지의 주소와 경로가 정확한지 한번 더 확인 후 이용하시기 바랍니다.</p>
+    <a href="/" class="btn-home">홈으로 돌아가기</a>
+    <footer>
+     <!-- <p>문의: <a href="mailto:">info@example.com</a> | 전화: 02-123-4567</p>-->
+    </footer>
+</div>
+</body>
+</html>
