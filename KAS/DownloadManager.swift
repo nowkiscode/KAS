@@ -5,6 +5,7 @@
 
 import Foundation
 import AppKit
+import WebKit
 import Combine
 import OSLog
 
@@ -53,6 +54,138 @@ nonisolated struct DownloadAttemptResult: Sendable {
     let lastErrorMessage: String?
 }
 
+@MainActor
+class WebViewScraper: NSObject, WKNavigationDelegate {
+    private var webView: WKWebView!
+    private var completion: (([(name: String, url: URL)]) -> Void)?
+    private var retries = 0
+    
+    override init() {
+        super.init()
+        let config = WKWebViewConfiguration()
+        config.websiteDataStore = .default()
+        self.webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 800, height: 600), configuration: config)
+        self.webView.navigationDelegate = self
+    }
+    
+    func scrapeAttachments(url: URL, nidAut: String, nidSes: String, completion: @escaping ([(name: String, url: URL)]) -> Void) {
+        self.completion = completion
+        self.retries = 10
+        
+        let dataStore = webView.configuration.websiteDataStore
+        let autCookie = HTTPCookie(properties: [
+            .domain: ".naver.com",
+            .path: "/",
+            .name: "NID_AUT",
+            .value: nidAut,
+            .secure: "TRUE"
+        ])!
+        let sesCookie = HTTPCookie(properties: [
+            .domain: ".naver.com",
+            .path: "/",
+            .name: "NID_SES",
+            .value: nidSes,
+            .secure: "TRUE"
+        ])!
+        
+        dataStore.httpCookieStore.setCookie(autCookie) {
+            dataStore.httpCookieStore.setCookie(sesCookie) {
+                DispatchQueue.main.async {
+                    self.webView.load(URLRequest(url: url))
+                }
+            }
+        }
+    }
+    
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        pollDOM()
+    }
+    
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        self.completion?([])
+        self.completion = nil
+    }
+    
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        self.completion?([])
+        self.completion = nil
+    }
+    
+    private func pollDOM() {
+        let script = """
+        (() => {
+          const candidates = [];
+          const roots = [document];
+          const frames = Array.from(document.querySelectorAll('iframe'));
+          for (const frame of frames) {
+            try {
+              if (frame.contentDocument) roots.push(frame.contentDocument);
+            } catch (_) {}
+          }
+          
+          for (const root of roots) {
+            const buttons = root.querySelectorAll('a.se-file-save-button, a[href*="downapi.cafe.naver.com/v1.0/cafes/article/file"]');
+            
+            for (const btn of buttons) {
+              const url = btn.getAttribute('href') || btn.dataset.link;
+              if (!url) continue;
+              
+              let name = "attachment";
+              const container = btn.closest('div[class*="se-file"], div[class*="se-module-file"], div[class*="file_box"], div[class*="Attachment"]') || btn.parentElement;
+              if (container) {
+                const nameEl = container.querySelector('.se-file-name, .file_name, strong, span.name');
+                if (nameEl && nameEl.textContent.trim()) {
+                  name = nameEl.textContent.trim();
+                } else {
+                    let containerText = container.textContent.replace(btn.textContent, '').replace(/\\s+/g, ' ').trim();
+                    if (containerText.length > 0 && containerText.length < 100) {
+                        name = containerText;
+                    }
+                }
+              }
+              candidates.push({ name: name, url: url });
+            }
+          }
+          return JSON.stringify(candidates);
+        })();
+        """
+        
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            guard let self = self else { return }
+            if let json = result as? String,
+               let data = json.data(using: .utf8),
+               let items = try? JSONSerialization.jsonObject(with: data) as? [[String: String]] {
+                let files: [(name: String, url: URL)] = items.compactMap { dict in
+                    guard let name = dict["name"], let urlStr = dict["url"], let url = URL(string: urlStr) else { return nil }
+                    return (name: name, url: url)
+                }
+                if !files.isEmpty {
+                    self.completion?(files)
+                    self.completion = nil
+                    return
+                }
+            }
+            
+            if self.retries > 0 {
+                self.retries -= 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    self.pollDOM()
+                }
+            } else {
+                webView.evaluateJavaScript("window.location.href") { [weak self] url, _ in
+                    guard let self = self else { return }
+                    self.webView.evaluateJavaScript("document.body.innerText.substring(0, 500)") { text, _ in
+                        print("WebViewScraper Failed. Final URL: \(url ?? "nil")")
+                        print("WebViewScraper Final Text Preview: \(text ?? "nil")")
+                        self.completion?([])
+                        self.completion = nil
+                    }
+                }
+            }
+        }
+    }
+}
+
 nonisolated struct AttachmentFetchResult: Sendable {
     let files: [(name: String, url: URL)]
     let errorMessage: String?
@@ -64,6 +197,7 @@ nonisolated struct AttachmentFetchResult: Sendable {
 class DownloadManager: ObservableObject {
     static let shared = DownloadManager()
     private let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "KAS", category: "Download")
+    private let scraper = WebViewScraper()
 
     @Published var statusByArticle: [String: DownloadStatus] = [:]  // key: article link
     @Published var batchStatus: DownloadStatus = .idle
@@ -231,13 +365,37 @@ class DownloadManager: ObservableObject {
         request.setValue(NaverCafeConfig.mobileCafeURL, forHTTPHeaderField: "Referer")
         request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
         request.setValue("mobile", forHTTPHeaderField: "X-Cafe-Product")
-        request.setValue("NID_AUT=\(nidAut); NID_SES=\(nidSes)", forHTTPHeaderField: "Cookie")
 
-        URLSession.shared.dataTask(with: request) { data, response, error in
+        DispatchQueue.main.async {
+            WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                var cookieValues = ["NID_AUT=\(nidAut)", "NID_SES=\(nidSes)"]
+                for cookie in cookies {
+                    if cookie.name != "NID_AUT" && cookie.name != "NID_SES" {
+                        cookieValues.append("\(cookie.name)=\(cookie.value)")
+                    }
+                }
+                request.setValue(cookieValues.joined(separator: "; "), forHTTPHeaderField: "Cookie")
+
+                URLSession.shared.dataTask(with: request) { data, response, error in
             guard let data = data, error == nil else {
                 let message = (error as NSError?)?.localizedDescription ?? "게시글 상세 정보를 불러오지 못했습니다"
                 self.logger.error("Attachment request failed for article id \(articleId, privacy: .public): \(message, privacy: .public)")
                 completion(AttachmentFetchResult(files: [], errorMessage: message))
+                return
+            }
+
+            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 401 {
+                self.logger.info("API returned 401 for article id \(articleId, privacy: .public). Falling back to WebView scraper.")
+                let fallbackURL = URL(string: "https://m.cafe.naver.com/\(NaverCafeConfig.cafeSlug)/\(articleId)")!
+                Task { @MainActor in
+                    self.scraper.scrapeAttachments(url: fallbackURL, nidAut: nidAut, nidSes: nidSes) { files in
+                        if files.isEmpty {
+                            completion(AttachmentFetchResult(files: [], errorMessage: "첨부 정보 요청이 거부되었습니다 (HTTP 401) 및 웹뷰 스크래핑 실패"))
+                        } else {
+                            completion(AttachmentFetchResult(files: files, errorMessage: nil))
+                        }
+                    }
+                }
                 return
             }
 
@@ -260,34 +418,31 @@ class DownloadManager: ObservableObject {
                     }
                 }
 
-                // 이미지 (첨부파일이 없을 경우 폴백)
+                // Remove imageList and contentHtml fallback to prioritize actual file attachments via WebViewScraper
+
                 if files.isEmpty {
-                    for (idx, img) in (article.imageList ?? []).enumerated() {
-                        if let urlStr = img.downloadURL, let imgURL = URL(string: urlStr) {
-                            let ext = (urlStr as NSString).pathExtension.isEmpty ? "jpg" : (urlStr as NSString).pathExtension
-                            files.append((name: "image_\(idx + 1).\(ext)", url: imgURL))
+                    self.logger.info("API returned 200 but no files found. Falling back to WebView scraper for article id \(articleId, privacy: .public).")
+                    let fallbackURL = URL(string: "https://m.cafe.naver.com/\(NaverCafeConfig.cafeSlug)/\(articleId)")!
+                    Task { @MainActor in
+                        self.scraper.scrapeAttachments(url: fallbackURL, nidAut: nidAut, nidSes: nidSes) { webFiles in
+                            if webFiles.isEmpty {
+                                completion(AttachmentFetchResult(files: [], errorMessage: "이 게시글에는 내려받을 첨부파일이 없거나 권한이 없습니다"))
+                            } else {
+                                completion(AttachmentFetchResult(files: webFiles, errorMessage: nil))
+                            }
                         }
                     }
+                    return
                 }
 
-                if files.isEmpty, let contentHtml = article.contentHtml {
-                    let htmlFiles = self.extractFilesFromHTML(contentHtml)
-                    if !htmlFiles.isEmpty {
-                        self.logger.info("Recovered \(htmlFiles.count) downloadable file(s) from contentHtml for article id \(articleId, privacy: .public)")
-                        files.append(contentsOf: htmlFiles)
-                    }
-                }
-
-                let errorMessage = files.isEmpty ? "이 게시글에는 내려받을 첨부파일이 없거나 권한이 없습니다" : nil
-                if let errorMessage {
-                    self.logger.error("No downloadable files found for article id \(articleId, privacy: .public): \(errorMessage, privacy: .public)")
-                }
-                completion(AttachmentFetchResult(files: files, errorMessage: errorMessage))
+                completion(AttachmentFetchResult(files: files, errorMessage: nil))
             } catch {
                 self.logger.error("Failed to decode attachment response for article id \(articleId, privacy: .public)")
                 completion(AttachmentFetchResult(files: [], errorMessage: "첨부 정보를 해석하지 못했습니다"))
             }
         }.resume()
+            }
+        }
     }
 
     /// 파일 목록을 지정 디렉토리에 순차 다운로드
@@ -307,13 +462,30 @@ class DownloadManager: ObservableObject {
         let total = files.count
         var successCount = 0
         var lastErrorMessage: String?
+        
+        let allCookies: [HTTPCookie] = await withCheckedContinuation { continuation in
+            DispatchQueue.main.async {
+                WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+                    continuation.resume(returning: cookies)
+                }
+            }
+        }
+        
+        var cookieValues = ["NID_AUT=\(nidAut)", "NID_SES=\(nidSes)"]
+        for cookie in allCookies {
+            if cookie.name != "NID_AUT" && cookie.name != "NID_SES" {
+                cookieValues.append("\(cookie.name)=\(cookie.value)")
+            }
+        }
+        let fullCookieString = cookieValues.joined(separator: "; ")
+
         for (idx, file) in files.enumerated() {
             var request = URLRequest(url: file.url)
             request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
             request.setValue(NaverCafeConfig.mobileCafeURL, forHTTPHeaderField: "Referer")
             request.setValue("application/json, text/plain, */*", forHTTPHeaderField: "Accept")
             request.setValue("mobile", forHTTPHeaderField: "X-Cafe-Product")
-            request.setValue("NID_AUT=\(nidAut); NID_SES=\(nidSes)", forHTTPHeaderField: "Cookie")
+            request.setValue(fullCookieString, forHTTPHeaderField: "Cookie")
             logger.info("Downloading file \(file.name, privacy: .public) from \(file.url.absoluteString, privacy: .public)")
 
             do {
@@ -327,13 +499,33 @@ class DownloadManager: ObservableObject {
                     continue
                 }
 
-                let destURL = dir.appendingPathComponent(file.name)
+                // Use Content-Disposition filename if available
+                var finalName = file.name
+                if let httpResponse = response as? HTTPURLResponse,
+                   let header = httpResponse.value(forHTTPHeaderField: "Content-Disposition") ?? httpResponse.allHeaderFields["Content-Disposition"] as? String {
+                    if let filenameRange = header.range(of: "filename=\"") {
+                        let rest = header[filenameRange.upperBound...]
+                        if let endQuote = rest.firstIndex(of: "\"") {
+                            let name = String(rest[..<endQuote])
+                            if !name.isEmpty {
+                                finalName = name
+                            }
+                        }
+                    } else if let filenameUtf8Range = header.range(of: "filename*=UTF-8''") {
+                        let name = String(header[filenameUtf8Range.upperBound...])
+                        if let decodedName = name.removingPercentEncoding, !decodedName.isEmpty {
+                            finalName = decodedName
+                        }
+                    }
+                }
+                
+                let destURL = dir.appendingPathComponent(finalName)
 
                 // 덮어쓰기 방지: 같은 이름 파일이 있으면 숫자 붙임
                 let finalURL = uniqueURL(for: destURL)
                 try FileManager.default.moveItem(at: tempURL, to: finalURL)
                 successCount += 1
-                logger.info("Saved file \(file.name, privacy: .public) to \(finalURL.path, privacy: .public)")
+                logger.info("Saved file \(finalName, privacy: .public) to \(finalURL.path, privacy: .public)")
 
                 let progress = Double(idx + 1) / Double(total)
                 await MainActor.run {
