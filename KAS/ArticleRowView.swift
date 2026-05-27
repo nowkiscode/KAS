@@ -9,6 +9,7 @@ struct ArticleRowView: View {
     let article: CafeArticle
     let menuName: String
     @ObservedObject var downloadManager: DownloadManager
+    @ObservedObject var bookmarkManager: BookmarkManager
     let studentName: String
     let nidAut: String
     let nidSes: String
@@ -73,6 +74,17 @@ struct ArticleRowView: View {
 
                 let articleId = article.link.components(separatedBy: "/").last ?? ""
                 HStack(spacing: 8) {
+                    // Bookmark button
+                    Button {
+                        bookmarkManager.toggle(article: article)
+                    } label: {
+                        Image(systemName: bookmarkManager.isBookmarked(article) ? "star.fill" : "star")
+                            .font(.title3)
+                            .foregroundStyle(bookmarkManager.isBookmarked(article) ? Color.yellow : Color.secondary.opacity(0.5))
+                    }
+                    .buttonStyle(.plain)
+                    .help(bookmarkManager.isBookmarked(article) ? "즐겨찾기 해제" : "즐겨찾기 추가")
+                    .animation(.spring(response: 0.25, dampingFraction: 0.6), value: bookmarkManager.isBookmarked(article))
                     if downloadManager.downloadedArticleIds.contains(articleId),
                        let filenames = downloadManager.downloadedFilesMap[articleId],
                        !filenames.isEmpty {

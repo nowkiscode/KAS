@@ -65,18 +65,25 @@ enum SortOrder: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
-    @AppStorage("savedUserName") private var userName = ""
+    // 내 이름 (설정 / 내 제출현황에서 사용)
+    @AppStorage("savedUserName") private var savedUserName = ""
     @AppStorage("nid_aut") private var nidAut = ""
     @AppStorage("nid_ses") private var nidSes = ""
     @AppStorage("recentSearches") private var recentSearchesString = ""
     
     @StateObject private var searchViewModel = SearchViewModel()
     @StateObject private var downloadManager = DownloadManager.shared
+    @StateObject private var bookmarkManager = BookmarkManager.shared
     
     @State private var isShowingLoginSheet = false
     @State private var isShowingSettingsSheet = false
+    @State private var isShowingSubmissionSheet = false
     @State private var selectedMenuId: String? = nil
     @State private var previewURL: URL? = nil
+    @State private var selectedTab = 0  // 0: 검색, 1: 즐겨찾기
+    
+    // 검색창 전용 변수 (savedUserName과 완전히 분리)
+    @State private var searchQuery = ""
     
     @State private var showOnlyWithAttachments = false
     @State private var showOnlyNotDownloaded = false
@@ -86,8 +93,8 @@ struct ContentView: View {
     @State private var showToast = false
     @State private var toastMessage = ""
 
-    var trimmedUserName: String {
-        userName.trimmingCharacters(in: .whitespacesAndNewlines)
+    var trimmedSearchQuery: String {
+        searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     var filteredSearchResults: [CafeArticle] {
@@ -138,7 +145,127 @@ struct ContentView: View {
     var body: some View {
         ZStack(alignment: .bottom) {
             NavigationStack {
-                VStack(spacing: 20) {
+                VStack(spacing: 0) {
+                    // Tab Picker
+                    Picker("", selection: $selectedTab) {
+                        Label("검색", systemImage: "magnifyingglass").tag(0)
+                        Label("즐겨찾기", systemImage: "star.fill").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+
+                    if selectedTab == 0 {
+                        searchTabContent
+                    } else {
+                        bookmarkTabContent
+                    }
+                }
+                .background(.ultraThinMaterial)
+                .navigationTitle("KAS")
+                .onAppear {
+                    searchViewModel.loadCafeMenuNames()
+                }
+                .toolbar {
+                    ToolbarItem(placement: .automatic) {
+                        HStack(spacing: 8) {
+                            // 내 제출 현황 버튼
+                            Button {
+                                isShowingSubmissionSheet = true
+                            } label: {
+                                Image(systemName: "list.clipboard")
+                            }
+                            .help("내 제출 현황")
+
+                            Button {
+                                isShowingSettingsSheet = true
+                            } label: {
+                                Image(systemName: "gearshape")
+                            }
+                            .help("설정")
+                            
+                            if nidAut.isEmpty || nidSes.isEmpty {
+                                Button {
+                                    isShowingLoginSheet = true
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "person.crop.circle.badge.plus")
+                                        Text("네이버 로그인")
+                                    }
+                                }
+                            } else {
+                                Button(role: .destructive) {
+                                    logoutNaver()
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "person.crop.circle.badge.xmark")
+                                        Text("로그아웃")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .sheet(isPresented: $isShowingLoginSheet) {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button("닫기") {
+                                isShowingLoginSheet = false
+                            }
+                            .padding()
+                        }
+                        NaverLoginWebView(isPresented: $isShowingLoginSheet, nidAut: $nidAut, nidSes: $nidSes)
+                    }
+                    .frame(minWidth: 450, minHeight: 650)
+                }
+                .sheet(isPresented: $isShowingSettingsSheet) {
+                    SettingsView(isPresented: $isShowingSettingsSheet, downloadManager: downloadManager)
+                }
+                .sheet(isPresented: $isShowingSubmissionSheet) {
+                    MySubmissionView(
+                        isPresented: $isShowingSubmissionSheet,
+                        nidAut: nidAut,
+                        nidSes: nidSes,
+                        menuIdMap: searchViewModel.menuIdMap
+                    )
+                }
+            }
+            .onChange(of: downloadManager.batchStatus) { _, newStatus in
+                if case .done(let count) = newStatus {
+                    showToastMessage("\(count)개 과제 일괄 다운로드 완료!")
+                }
+            }
+            .overlay(
+                VStack {
+                    Spacer()
+                    if showToast {
+                        Text(toastMessage)
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                            .background(Color.blue.opacity(0.9))
+                            .clipShape(Capsule())
+                            .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                            .padding(.bottom, 30)
+                    }
+                }
+                .animation(.spring(response: 0.4, dampingFraction: 0.7), value: showToast)
+            )
+            .quickLookPreview($previewURL)
+        }
+    }
+
+    // MARK: - Search Tab
+
+    @ViewBuilder
+    private var searchTabContent: some View {
+        ScrollView {
+            VStack(spacing: 20) {
                 Image("logo")
                     .resizable()
                     .scaledToFit()
@@ -148,7 +275,7 @@ struct ContentView: View {
                     .font(.largeTitle)
                     //.fontWeight(.bold)
 
-                Text("현재 버전 : 0.3.1 (beta)")
+                Text("현재 버전 : 0.4.0 (beta)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 
@@ -173,17 +300,17 @@ struct ContentView: View {
                 }
 
                 HStack {
-                    TextField("학생 이름 입력", text: $userName)
+                    TextField("학생 이름 입력", text: $searchQuery)
                         .textFieldStyle(.roundedBorder)
                         .onSubmit {
-                            if !trimmedUserName.isEmpty {
-                                addRecentSearch(trimmedUserName)
-                                searchViewModel.searchCafeArticles(userName: trimmedUserName, nidAut: nidAut, nidSes: nidSes)
+                            if !trimmedSearchQuery.isEmpty {
+                                addRecentSearch(trimmedSearchQuery)
+                                searchViewModel.searchCafeArticles(userName: trimmedSearchQuery, nidAut: nidAut, nidSes: nidSes)
                             }
                         }
 
                     Button {
-                        let targetName = trimmedUserName.isEmpty ? searchViewModel.searchedStudentName : trimmedUserName
+                        let targetName = trimmedSearchQuery.isEmpty ? searchViewModel.searchedStudentName : trimmedSearchQuery
                         if !targetName.isEmpty {
                             downloadManager.openDownloadsDir(for: targetName)
                         }
@@ -191,7 +318,7 @@ struct ContentView: View {
                         Image(systemName: "folder")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(trimmedUserName.isEmpty && searchViewModel.searchedStudentName.isEmpty)
+                    .disabled(trimmedSearchQuery.isEmpty && searchViewModel.searchedStudentName.isEmpty)
                 }
 
                 if !recentSearches.isEmpty {
@@ -205,7 +332,7 @@ struct ContentView: View {
                                 RecentSearchTagView(
                                     name: name,
                                     onSelect: {
-                                        userName = name
+                                        searchQuery = name
                                         addRecentSearch(name)
                                         searchViewModel.searchCafeArticles(userName: name, nidAut: nidAut, nidSes: nidSes)
                                     },
@@ -223,8 +350,8 @@ struct ContentView: View {
 //                    .foregroundStyle(.secondary)
 
                 Button {
-                    addRecentSearch(trimmedUserName)
-                    searchViewModel.searchCafeArticles(userName: trimmedUserName, nidAut: nidAut, nidSes: nidSes)
+                    addRecentSearch(trimmedSearchQuery)
+                    searchViewModel.searchCafeArticles(userName: trimmedSearchQuery, nidAut: nidAut, nidSes: nidSes)
                 } label: {
                     HStack {
                         Image(systemName: "magnifyingglass")
@@ -233,7 +360,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(trimmedUserName.isEmpty)
+                .disabled(trimmedSearchQuery.isEmpty)
 
                 if searchViewModel.isLoading {
                     ProgressView("네이버 카페 검색 중...")
@@ -409,110 +536,74 @@ struct ContentView: View {
                     .padding(.bottom, 80)
                     Spacer()
                 } else {
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach(filteredSearchResults) { article in
-                                let menuName = searchViewModel.menuIdMap[article.menuId ?? ""] ?? "게시판 \(article.menuId ?? "")"
-                                ArticleRowView(
-                                    article: article,
-                                    menuName: menuName,
-                                    downloadManager: downloadManager,
-                                    studentName: searchViewModel.searchedStudentName,
-                                    nidAut: nidAut,
-                                    nidSes: nidSes,
-                                    onPreview: { url in
-                                        self.previewURL = url
-                                    }
-                                )
-                            }
+                    LazyVStack(spacing: 8) {
+                        ForEach(filteredSearchResults) { article in
+                            let menuName = searchViewModel.menuIdMap[article.menuId ?? ""] ?? "게시판 \(article.menuId ?? "")"
+                            ArticleRowView(
+                                article: article,
+                                menuName: menuName,
+                                downloadManager: downloadManager,
+                                bookmarkManager: bookmarkManager,
+                                studentName: searchViewModel.searchedStudentName,
+                                nidAut: nidAut,
+                                nidSes: nidSes,
+                                onPreview: { url in
+                                    self.previewURL = url
+                                }
+                            )
                         }
-                        .padding(.vertical, 4)
-                        .padding(.horizontal, 4)
                     }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 4)
                 }
             }
             .padding()
-            .background(.ultraThinMaterial)
-            .navigationTitle("KAS")
-            .onAppear {
-                searchViewModel.loadCafeMenuNames()
-            }
-            .toolbar {
-                ToolbarItem(placement: .automatic) {
-                    HStack(spacing: 8) {
-                        Button {
-                            isShowingSettingsSheet = true
-                        } label: {
-                            Image(systemName: "gearshape")
-                        }
-                        .help("설정")
-                        
-                        if nidAut.isEmpty || nidSes.isEmpty {
-                            Button {
-                                isShowingLoginSheet = true
-                            } label: {
-                                HStack {
-                                    Image(systemName: "person.crop.circle.badge.plus")
-                                    Text("네이버 로그인")
-                                }
-                            }
-                        } else {
-                            Button(role: .destructive) {
-                                logoutNaver()
-                            } label: {
-                                HStack {
-                                    Image(systemName: "person.crop.circle.badge.xmark")
-                                    Text("로그아웃")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            .sheet(isPresented: $isShowingLoginSheet) {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Button("닫기") {
-                            isShowingLoginSheet = false
-                        }
-                        .padding()
-                    }
-                    NaverLoginWebView(isPresented: $isShowingLoginSheet, nidAut: $nidAut, nidSes: $nidSes)
-                }
-                .frame(minWidth: 450, minHeight: 650)
-            }
-            .sheet(isPresented: $isShowingSettingsSheet) {
-                SettingsView(isPresented: $isShowingSettingsSheet, downloadManager: downloadManager)
-            }
-        }
-        .onChange(of: downloadManager.batchStatus) { newStatus in
-            if case .done(let count) = newStatus {
-                showToastMessage("\(count)개 과제 일괄 다운로드 완료!")
-            }
-        }
-        .overlay(
-            VStack {
+        } // end ScrollView (searchTabContent)
+    }
+
+    // MARK: - Bookmark Tab
+
+    @ViewBuilder
+    private var bookmarkTabContent: some View {
+        if bookmarkManager.bookmarkedArticles.isEmpty {
+            VStack(spacing: 16) {
                 Spacer()
-                if showToast {
-                    Text(toastMessage)
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 24)
-                        .padding(.vertical, 12)
-                        .background(Color.blue.opacity(0.9))
-                        .clipShape(Capsule())
-                        .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                        .padding(.bottom, 30)
-                }
+                Image(systemName: "star")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.yellow.opacity(0.5))
+                Text("즐겨찾기가 비어있습니다")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text("게시글 목록에서 ★를 눌러 즐겨찾기에 추가하세요")
+                    .font(.subheadline)
+                    .foregroundStyle(.tertiary)
+                Spacer()
             }
-            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: showToast)
-        )
-        .quickLookPreview($previewURL)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(bookmarkManager.bookmarkedArticles) { article in
+                        let menuName = searchViewModel.menuIdMap[article.menuId ?? ""] ?? "게시판 \(article.menuId ?? "")"
+                        ArticleRowView(
+                            article: article,
+                            menuName: menuName,
+                            downloadManager: downloadManager,
+                            bookmarkManager: bookmarkManager,
+                            studentName: searchViewModel.searchedStudentName,
+                            nidAut: nidAut,
+                            nidSes: nidSes,
+                            onPreview: { url in
+                                self.previewURL = url
+                            }
+                        )
+                    }
+                }
+                .padding()
+            }
         }
     }
+
+    // (body closing brace moved up)
 
     private func showToastMessage(_ message: String) {
         toastMessage = message
@@ -643,6 +734,7 @@ struct SettingsView: View {
     @Binding var isPresented: Bool
     @ObservedObject var downloadManager: DownloadManager
     
+    @AppStorage("savedUserName") private var savedUserName = ""
     @AppStorage("customDownloadPath") private var customDownloadPath = ""
     @AppStorage("openFinderOnDownload") private var openFinderOnDownload = true
     
@@ -663,6 +755,20 @@ struct SettingsView: View {
             .padding(.bottom, 10)
             
             Form {
+                Section(header: Text("내 정보").font(.headline)) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("내 이름")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        TextField("이름 입력 (내 제출 현황 화면에 사용)", text: $savedUserName)
+                            .textFieldStyle(.roundedBorder)
+                        Text("입력한 이름으로 내 제출 현황 (클립보드 아이콘)을 조회합니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                }
+
                 Section(header: Text("다운로드 설정").font(.headline)) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("저장 경로")
@@ -748,7 +854,7 @@ struct SettingsView: View {
             Spacer()
         }
         .padding()
-        .frame(width: 520, height: 440)
+        .frame(width: 520, height: 560)
     }
     
     private func selectDownloadFolder() {
