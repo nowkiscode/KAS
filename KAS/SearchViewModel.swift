@@ -13,6 +13,7 @@ class SearchViewModel: ObservableObject {
     @Published var errorMessage = ""
     @Published var menuLoadErrorMessage = ""
     @Published var menuIdMap: [String: String] = [:]
+    @Published var searchedStudentName: String = ""
     
     private var activeSearchToken = UUID()
     
@@ -53,7 +54,8 @@ class SearchViewModel: ObservableObject {
                 cafeName: NaverCafeConfig.cafeName,
                 description: item.summary,
                 menuId: String(item.menuId),
-                writerNickname: item.writerInfo?.nickname
+                writerNickname: item.writerInfo?.nickname,
+                hasAttachment: item.attachFile ?? false
             )
         }
     }
@@ -70,6 +72,7 @@ class SearchViewModel: ObservableObject {
         isLoading = true
         errorMessage = ""
         searchResults = []
+        searchedStudentName = query
         
         let nfcQuery = query.precomposedStringWithCanonicalMapping
         let nfdQuery = query.decomposedStringWithCanonicalMapping

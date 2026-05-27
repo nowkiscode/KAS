@@ -7,6 +7,7 @@
 
 import SwiftUI
 import WebKit
+import QuickLook
 
 enum NaverCafeConfig {
     static let cafeId = "28411094"
@@ -25,6 +26,7 @@ nonisolated struct CafeArticle: Identifiable, Codable, Sendable {
     let description: String?
     var menuId: String? = nil
     var writerNickname: String? = nil
+    var hasAttachment: Bool? = nil
 }
 
 nonisolated struct CafeSearchResponse: Decodable, Sendable {
@@ -48,10 +50,18 @@ nonisolated struct CafeSearchArticleItem: Decodable, Sendable {
     let summary: String?
     let addDate: String?
     let writerInfo: CafeSearchWriterInfo?
+    let attachFile: Bool?
 }
 
 nonisolated struct CafeSearchWriterInfo: Decodable, Sendable {
     let nickname: String
+}
+
+enum SortOrder: String, CaseIterable, Identifiable {
+    case newest = "최신순"
+    case oldest = "오래된순"
+    
+    var id: String { self.rawValue }
 }
 
 struct ContentView: View {
@@ -64,7 +74,13 @@ struct ContentView: View {
     @StateObject private var downloadManager = DownloadManager.shared
     
     @State private var isShowingLoginSheet = false
+    @State private var isShowingSettingsSheet = false
     @State private var selectedMenuId: String? = nil
+    @State private var previewURL: URL? = nil
+    
+    @State private var showOnlyWithAttachments = false
+    @State private var showOnlyNotDownloaded = false
+    @State private var sortOrder = SortOrder.newest
     
     // Toast State
     @State private var showToast = false
@@ -75,10 +91,30 @@ struct ContentView: View {
     }
 
     var filteredSearchResults: [CafeArticle] {
+        var results = searchViewModel.searchResults
+        
         if let selectedMenuId = selectedMenuId {
-            return searchViewModel.searchResults.filter { $0.menuId == selectedMenuId }
+            results = results.filter { $0.menuId == selectedMenuId }
         }
-        return searchViewModel.searchResults
+        
+        if showOnlyWithAttachments {
+            results = results.filter { $0.hasAttachment == true }
+        }
+        
+        if showOnlyNotDownloaded {
+            results = results.filter { article in
+                let articleId = article.link.components(separatedBy: "/").last ?? ""
+                return !downloadManager.downloadedArticleIds.contains(articleId)
+            }
+        }
+        
+        results.sort { art1, art2 in
+            let id1 = Int(art1.link.components(separatedBy: "/").last ?? "") ?? 0
+            let id2 = Int(art2.link.components(separatedBy: "/").last ?? "") ?? 0
+            return sortOrder == .newest ? id1 > id2 : id1 < id2
+        }
+        
+        return results
     }
 
     private var recentSearches: [String] {
@@ -147,14 +183,15 @@ struct ContentView: View {
                         }
 
                     Button {
-                        if !trimmedUserName.isEmpty {
-                            downloadManager.openDownloadsDir(for: trimmedUserName)
+                        let targetName = trimmedUserName.isEmpty ? searchViewModel.searchedStudentName : trimmedUserName
+                        if !targetName.isEmpty {
+                            downloadManager.openDownloadsDir(for: targetName)
                         }
                     } label: {
                         Image(systemName: "folder")
                     }
                     .buttonStyle(.bordered)
-                    .disabled(trimmedUserName.isEmpty)
+                    .disabled(trimmedUserName.isEmpty && searchViewModel.searchedStudentName.isEmpty)
                 }
 
                 if !recentSearches.isEmpty {
@@ -250,6 +287,34 @@ struct ContentView: View {
                             .font(.caption2)
                             .foregroundStyle(.orange)
                     }
+                    
+                    // Filter & Sort Bar
+                    HStack(spacing: 16) {
+                        Toggle(isOn: $showOnlyWithAttachments) {
+                            Text("첨부파일 있음")
+                                .font(.subheadline)
+                        }
+                        .toggleStyle(.checkbox)
+                        
+                        Toggle(isOn: $showOnlyNotDownloaded) {
+                            Text("미다운로드")
+                                .font(.subheadline)
+                        }
+                        .toggleStyle(.checkbox)
+                        
+                        Spacer()
+                        
+                        Picker("정렬", selection: $sortOrder) {
+                            ForEach(SortOrder.allCases) { order in
+                                Text(order.rawValue).tag(order)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .labelsHidden()
+                        .frame(width: 90)
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
                 }
 
                 if !searchViewModel.searchResults.isEmpty {
@@ -278,7 +343,8 @@ struct ContentView: View {
                                 downloadManager.resetBatch()
                                 downloadManager.downloadAll(
                                     articles: filteredSearchResults,
-                                    studentName: trimmedUserName,
+                                    studentName: searchViewModel.searchedStudentName,
+                                    menuIdMap: searchViewModel.menuIdMap,
                                     nidAut: nidAut, nidSes: nidSes
                                 )
                             } label: {
@@ -351,9 +417,12 @@ struct ContentView: View {
                                     article: article,
                                     menuName: menuName,
                                     downloadManager: downloadManager,
-                                    studentName: trimmedUserName,
+                                    studentName: searchViewModel.searchedStudentName,
                                     nidAut: nidAut,
-                                    nidSes: nidSes
+                                    nidSes: nidSes,
+                                    onPreview: { url in
+                                        self.previewURL = url
+                                    }
                                 )
                             }
                         }
@@ -370,22 +439,31 @@ struct ContentView: View {
             }
             .toolbar {
                 ToolbarItem(placement: .automatic) {
-                    if nidAut.isEmpty || nidSes.isEmpty {
+                    HStack(spacing: 8) {
                         Button {
-                            isShowingLoginSheet = true
+                            isShowingSettingsSheet = true
                         } label: {
-                            HStack {
-                                Image(systemName: "person.crop.circle.badge.plus")
-                                Text("네이버 로그인")
-                            }
+                            Image(systemName: "gearshape")
                         }
-                    } else {
-                        Button(role: .destructive) {
-                            logoutNaver()
-                        } label: {
-                            HStack {
-                                Image(systemName: "person.crop.circle.badge.xmark")
-                                Text("로그아웃")
+                        .help("설정")
+                        
+                        if nidAut.isEmpty || nidSes.isEmpty {
+                            Button {
+                                isShowingLoginSheet = true
+                            } label: {
+                                HStack {
+                                    Image(systemName: "person.crop.circle.badge.plus")
+                                    Text("네이버 로그인")
+                                }
+                            }
+                        } else {
+                            Button(role: .destructive) {
+                                logoutNaver()
+                            } label: {
+                                HStack {
+                                    Image(systemName: "person.crop.circle.badge.xmark")
+                                    Text("로그아웃")
+                                }
                             }
                         }
                     }
@@ -403,6 +481,9 @@ struct ContentView: View {
                     NaverLoginWebView(isPresented: $isShowingLoginSheet, nidAut: $nidAut, nidSes: $nidSes)
                 }
                 .frame(minWidth: 450, minHeight: 650)
+            }
+            .sheet(isPresented: $isShowingSettingsSheet) {
+                SettingsView(isPresented: $isShowingSettingsSheet, downloadManager: downloadManager)
             }
         }
         .onChange(of: downloadManager.batchStatus) { newStatus in
@@ -429,6 +510,7 @@ struct ContentView: View {
             }
             .animation(.spring(response: 0.4, dampingFraction: 0.7), value: showToast)
         )
+        .quickLookPreview($previewURL)
         }
     }
 
@@ -554,5 +636,135 @@ struct RecentSearchTagView: View {
         }
         .padding(.top, 4)
         .padding(.trailing, 4)
+    }
+}
+
+struct SettingsView: View {
+    @Binding var isPresented: Bool
+    @ObservedObject var downloadManager: DownloadManager
+    
+    @AppStorage("customDownloadPath") private var customDownloadPath = ""
+    @AppStorage("openFinderOnDownload") private var openFinderOnDownload = true
+    
+    @State private var syncStatusMessage = ""
+    
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Text("KAS 설정")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Spacer()
+                Button("닫기") {
+                    isPresented = false
+                }
+                .buttonStyle(.bordered)
+            }
+            .padding(.bottom, 10)
+            
+            Form {
+                Section(header: Text("다운로드 설정").font(.headline)) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("저장 경로")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        HStack {
+                            Text(customDownloadPath.isEmpty ? "Downloads/KAS (기본값)" : customDownloadPath)
+                                .font(.system(.body, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(Color.gray.opacity(0.1))
+                                .cornerRadius(4)
+                            
+                            Button("선택...") {
+                                selectDownloadFolder()
+                            }
+                            
+                            if !customDownloadPath.isEmpty {
+                                Button("초기화") {
+                                    customDownloadPath = ""
+                                    UserDefaults.standard.removeObject(forKey: "customDownloadBookmark")
+                                }
+                            }
+                        }
+                        
+                        Text("선택한 경로 아래에 각 학생 이름으로 폴더가 생성됩니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                    
+                    Divider()
+                    
+                    Toggle("다운로드 완료 후 Finder로 폴더 열기", isOn: $openFinderOnDownload)
+                        .padding(.vertical, 6)
+                    
+                    Divider()
+                    
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("다운로드 내역 동기화")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        HStack(spacing: 12) {
+                            Button(action: {
+                                let count = downloadManager.scanAndSyncDownloadHistory()
+                                if count > 0 {
+                                    syncStatusMessage = "\(count)개의 다운로드 내역이 동기화되었습니다."
+                                } else {
+                                    syncStatusMessage = "새로운 다운로드 내역을 찾지 못했습니다."
+                                }
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+                                    syncStatusMessage = ""
+                                }
+                            }) {
+                                HStack {
+                                    Image(systemName: "arrow.triangle.2.circlepath")
+                                    Text("기존 다운로드 파일 스캔 및 동기화")
+                                }
+                            }
+                            
+                            if !syncStatusMessage.isEmpty {
+                                Text(syncStatusMessage)
+                                    .font(.caption)
+                                    .foregroundStyle(.green)
+                                    .transition(.opacity)
+                            }
+                        }
+                        
+                        Text("설정된 저장 경로의 폴더들을 스캔하여 기존 다운로드 내역을 앱으로 불러옵니다.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 6)
+                }
+            }
+            .formStyle(.grouped)
+            
+            Spacer()
+        }
+        .padding()
+        .frame(width: 520, height: 440)
+    }
+    
+    private func selectDownloadFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.title = "다운로드 저장 폴더 선택"
+        if panel.runModal() == .OK, let url = panel.url {
+            do {
+                let bookmarkData = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+                UserDefaults.standard.set(bookmarkData, forKey: "customDownloadBookmark")
+                customDownloadPath = url.path
+            } catch {
+                print("Failed to save bookmark: \(error)")
+            }
+        }
     }
 }

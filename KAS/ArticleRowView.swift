@@ -12,6 +12,7 @@ struct ArticleRowView: View {
     let studentName: String
     let nidAut: String
     let nidSes: String
+    let onPreview: (URL) -> Void
     
     @State private var isHovered = false
     
@@ -70,70 +71,114 @@ struct ArticleRowView: View {
 
                 Spacer()
 
-                let status = downloadManager.statusByArticle[article.link] ?? .idle
-                VStack {
-                    switch status {
-                    case .idle:
-                        Button {
-                            downloadManager.downloadArticle(
-                                article,
-                                studentName: studentName,
-                                nidAut: nidAut, nidSes: nidSes
-                            )
-                        } label: {
-                            Image(systemName: "arrow.down.circle")
-                                .font(.title2)
-                                .foregroundStyle(nidAut.isEmpty ? .gray : .blue)
+                let articleId = article.link.components(separatedBy: "/").last ?? ""
+                HStack(spacing: 8) {
+                    if downloadManager.downloadedArticleIds.contains(articleId),
+                       let filenames = downloadManager.downloadedFilesMap[articleId],
+                       !filenames.isEmpty {
+                        
+                        let baseDir = downloadManager.getDownloadsDirURL(for: studentName, subjectName: menuName)
+                        let existingURLs = filenames.compactMap { name -> URL? in
+                            let u = baseDir.appendingPathComponent(name)
+                            return FileManager.default.fileExists(atPath: u.path) ? u : nil
                         }
-                        .buttonStyle(.plain)
-                        .disabled(nidAut.isEmpty || nidSes.isEmpty || studentName.isEmpty)
-                    case .fetchingInfo:
-                        Button {
-                            downloadManager.cancelArticle(link: article.link)
-                        } label: {
-                            Image(systemName: "stop.fill")
-                                .foregroundStyle(.red)
-                                .font(.caption)
+                        
+                        if !existingURLs.isEmpty {
+                            if existingURLs.count == 1 {
+                                Button {
+                                    onPreview(existingURLs[0])
+                                } label: {
+                                    Image(systemName: "eye.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(.blue)
+                                }
+                                .buttonStyle(.plain)
+                                .help("과제 파일 미리보기")
+                            } else {
+                                Menu {
+                                    ForEach(existingURLs, id: \.self) { url in
+                                        Button(url.lastPathComponent) {
+                                            onPreview(url)
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "eye.circle.fill")
+                                        .font(.title2)
+                                        .foregroundStyle(.blue)
+                                }
+                                .menuStyle(.borderlessButton)
+                                .frame(width: 24)
+                                .help("과제 파일 선택 미리보기")
+                            }
                         }
-                        .buttonStyle(.plain)
-                    case .downloading(let p):
-                        ZStack {
-                            Circle()
-                                .stroke(Color.blue.opacity(0.2), lineWidth: 3)
-                            Circle()
-                                .trim(from: 0, to: CGFloat(p))
-                                .stroke(Color.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
-                                .animation(.linear, value: p)
-                            
+                    }
+                    
+                    let status = downloadManager.statusByArticle[article.link] ?? .idle
+                    VStack {
+                        switch status {
+                        case .idle:
+                            Button {
+                                downloadManager.downloadArticle(
+                                    article,
+                                    studentName: studentName,
+                                    subjectName: menuName,
+                                    nidAut: nidAut, nidSes: nidSes
+                                )
+                            } label: {
+                                Image(systemName: "arrow.down.circle")
+                                    .font(.title2)
+                                    .foregroundStyle(nidAut.isEmpty ? .gray : .blue)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(nidAut.isEmpty || nidSes.isEmpty || studentName.isEmpty)
+                        case .fetchingInfo:
                             Button {
                                 downloadManager.cancelArticle(link: article.link)
                             } label: {
                                 Image(systemName: "stop.fill")
-                                    .resizable()
-                                    .frame(width: 8, height: 8)
                                     .foregroundStyle(.red)
+                                    .font(.caption)
                             }
                             .buttonStyle(.plain)
+                        case .downloading(let p):
+                            ZStack {
+                                Circle()
+                                    .stroke(Color.blue.opacity(0.2), lineWidth: 3)
+                                Circle()
+                                    .trim(from: 0, to: CGFloat(p))
+                                    .stroke(Color.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                    .rotationEffect(.degrees(-90))
+                                    .animation(.linear, value: p)
+                                
+                                Button {
+                                    downloadManager.cancelArticle(link: article.link)
+                                } label: {
+                                    Image(systemName: "stop.fill")
+                                        .resizable()
+                                        .frame(width: 8, height: 8)
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .frame(width: 24, height: 24)
+                        case .done:
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(.green)
+                                .font(.title2)
+                                .onTapGesture {
+                                    downloadManager.resetArticle(link: article.link)
+                                }
+                        case .error:
+                            Image(systemName: "exclamationmark.circle.fill")
+                                .foregroundStyle(.red)
+                                .font(.title2)
+                                .onTapGesture {
+                                    downloadManager.resetArticle(link: article.link)
+                                }
                         }
-                        .frame(width: 24, height: 24)
-                    case .done:
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.title2)
-                            .onTapGesture {
-                                downloadManager.resetArticle(link: article.link)
-                            }
-                    case .error:
-                        Image(systemName: "exclamationmark.circle.fill")
-                            .foregroundStyle(.red)
-                            .font(.title2)
-                            .onTapGesture {
-                                downloadManager.resetArticle(link: article.link)
-                            }
                     }
+                    .frame(width: 24)
                 }
-                .frame(width: 34)
             }
             .padding()
             .background(

@@ -39,6 +39,7 @@ enum DownloadStatus: Equatable {
 nonisolated struct DownloadAttemptResult: Sendable {
     let successCount: Int
     let lastErrorMessage: String?
+    let downloadedFiles: [String]
 }
 
 @MainActor
@@ -188,6 +189,7 @@ class DownloadManager: ObservableObject {
     @Published var batchStatus: DownloadStatus = .idle
     @Published var batchProgress: Double = 0.0
     @Published var downloadedArticleIds: Set<String> = []
+    @Published var downloadedFilesMap: [String: [String]] = [:]
 
     private var activeTasks: [String: Task<Void, Never>] = [:]
     private var batchTask: Task<Void, Never>?
@@ -197,6 +199,10 @@ class DownloadManager: ObservableObject {
            let set = try? JSONDecoder().decode(Set<String>.self, from: data) {
             self.downloadedArticleIds = set
         }
+        if let data = UserDefaults.standard.data(forKey: "downloadedFilesMap"),
+           let map = try? JSONDecoder().decode([String: [String]].self, from: data) {
+            self.downloadedFilesMap = map
+        }
     }
 
     private func saveDownloadedIds() {
@@ -205,9 +211,36 @@ class DownloadManager: ObservableObject {
         }
     }
 
+    private func saveDownloadedFilesMap() {
+        if let data = try? JSONEncoder().encode(downloadedFilesMap) {
+            UserDefaults.standard.set(data, forKey: "downloadedFilesMap")
+        }
+    }
+
+    private func getBaseDirURLAndStartAccess() -> (URL, Bool) {
+        if let bookmarkData = UserDefaults.standard.data(forKey: "customDownloadBookmark") {
+            var isStale = false
+            do {
+                let url = try URL(resolvingBookmarkData: bookmarkData, options: .withSecurityScope, relativeTo: nil, bookmarkDataIsStale: &isStale)
+                if isStale {
+                    let newBookmarkData = try url.bookmarkData(options: .withSecurityScope, includingResourceValuesForKeys: nil, relativeTo: nil)
+                    UserDefaults.standard.set(newBookmarkData, forKey: "customDownloadBookmark")
+                }
+                let success = url.startAccessingSecurityScopedResource()
+                return (url, success)
+            } catch {
+                print("Failed to resolve bookmark: \(error)")
+            }
+        }
+        
+        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+        let baseDir = downloads.appendingPathComponent("KAS")
+        return (baseDir, false)
+    }
+
     // MARK: - Public Interface
 
-    func downloadArticle(_ article: CafeArticle, studentName: String, nidAut: String, nidSes: String) {
+    func downloadArticle(_ article: CafeArticle, studentName: String, subjectName: String, nidAut: String, nidSes: String) {
         guard statusByArticle[article.link] == nil || statusByArticle[article.link] == .idle else { return }
         guard let articleId = articleId(from: article.link) else {
             statusByArticle[article.link] = .error("게시글 ID를 찾을 수 없습니다")
@@ -227,14 +260,16 @@ class DownloadManager: ObservableObject {
                 }
                 
                 try Task.checkCancellation()
-                let destDir = self.createAndGetDownloadsDir(for: studentName)
-                let result = await self.downloadFiles(files, to: destDir, progressKey: article.link, nidAut: nidAut, nidSes: nidSes)
+                let destDir = self.createAndGetDownloadsDir(for: studentName, subjectName: subjectName)
+                let result = await self.downloadFiles(files, to: destDir, progressKey: article.link, articleId: articleId, nidAut: nidAut, nidSes: nidSes)
                 
                 if result.successCount == 0 {
                     self.statusByArticle[article.link] = .error(result.lastErrorMessage ?? "다운로드에 실패했습니다")
                 } else {
                     self.downloadedArticleIds.insert(articleId)
+                    self.downloadedFilesMap[articleId] = result.downloadedFiles
                     self.saveDownloadedIds()
+                    self.saveDownloadedFilesMap()
                 }
             } catch is CancellationError {
                 self.statusByArticle[article.link] = .idle
@@ -246,11 +281,10 @@ class DownloadManager: ObservableObject {
         activeTasks[article.link] = task
     }
 
-    func downloadAll(articles: [CafeArticle], studentName: String, nidAut: String, nidSes: String) {
+    func downloadAll(articles: [CafeArticle], studentName: String, menuIdMap: [String: String], nidAut: String, nidSes: String) {
         guard batchStatus == .idle else { return }
         batchStatus = .fetchingInfo
         batchProgress = 0.0
-        let destDir = getDownloadsDirURL(for: studentName) // 실제 폴더 생성은 나중에 수행
 
         let task = Task {
             let total = articles.count
@@ -272,18 +306,24 @@ class DownloadManager: ObservableObject {
                     continue
                 }
 
+                let menuId = article.menuId ?? ""
+                let subjectName = menuIdMap[menuId] ?? "게시판 \(menuId)"
+                let destDir = getDownloadsDirURL(for: studentName, subjectName: subjectName)
+
                 do {
                     let files = try await fetchAttachments(articleId: articleId, nidAut: nidAut, nidSes: nidSes)
                     if Task.isCancelled { break }
                     if !files.isEmpty {
                         // 실제로 다운로드할 파일이 있을 때만 폴더 생성
-                        _ = self.createAndGetDownloadsDir(for: studentName)
+                        _ = self.createAndGetDownloadsDir(for: studentName, subjectName: subjectName)
                         
-                        let result = await self.downloadFiles(files, to: destDir, progressKey: nil, nidAut: nidAut, nidSes: nidSes)
+                        let result = await self.downloadFiles(files, to: destDir, progressKey: nil, articleId: articleId, nidAut: nidAut, nidSes: nidSes)
                         if result.successCount > 0 {
                             downloadedArticles += 1
                             self.downloadedArticleIds.insert(articleId)
+                            self.downloadedFilesMap[articleId] = result.downloadedFiles
                             self.saveDownloadedIds()
+                            self.saveDownloadedFilesMap()
                         } else {
                             lastErrorMsg = result.lastErrorMessage
                         }
@@ -303,7 +343,11 @@ class DownloadManager: ObservableObject {
                 self.batchStatus = .idle
             } else if downloadedArticles > 0 {
                 self.batchStatus = .done(count: downloadedArticles)
-                NSWorkspace.shared.open(destDir)
+                let baseStudentDir = getDownloadsDirURL(for: studentName)
+                let shouldOpen = UserDefaults.standard.object(forKey: "openFinderOnDownload") as? Bool ?? true
+                if shouldOpen {
+                    NSWorkspace.shared.open(baseStudentDir)
+                }
             } else {
                 self.batchStatus = .error(lastErrorMsg ?? "다운로드된 파일이 없습니다")
             }
@@ -333,29 +377,51 @@ class DownloadManager: ObservableObject {
     }
 
     func openDownloadsDir(for studentName: String) {
-        let dir = getDownloadsDirURL(for: studentName)
+        let (baseDir, isScoped) = getBaseDirURLAndStartAccess()
+        let safeStudentName = sanitizedDirectoryName(from: studentName)
+        let dir = baseDir.appendingPathComponent(safeStudentName)
+        
         if FileManager.default.fileExists(atPath: dir.path) {
             NSWorkspace.shared.open(dir)
         } else {
-            // 폴더가 없으면 상위 KAS 폴더를 엽니다
-            let baseDir = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!.appendingPathComponent("KAS")
             try? FileManager.default.createDirectory(at: baseDir, withIntermediateDirectories: true)
             NSWorkspace.shared.open(baseDir)
+        }
+        
+        if isScoped {
+            baseDir.stopAccessingSecurityScopedResource()
         }
     }
 
     // MARK: - Private Helpers
     private func articleId(from link: String) -> String? { link.components(separatedBy: "/").last }
 
-    private func getDownloadsDirURL(for studentName: String) -> URL {
-        let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+    func getDownloadsDirURL(for studentName: String, subjectName: String? = nil) -> URL {
+        let (baseDir, isScoped) = getBaseDirURLAndStartAccess()
         let safeStudentName = sanitizedDirectoryName(from: studentName)
-        return downloads.appendingPathComponent("KAS").appendingPathComponent(safeStudentName)
+        var dir = baseDir.appendingPathComponent(safeStudentName)
+        if let subject = subjectName {
+            let safeSubjectName = sanitizedDirectoryName(from: subject)
+            dir = dir.appendingPathComponent(safeSubjectName)
+        }
+        if isScoped {
+            baseDir.stopAccessingSecurityScopedResource()
+        }
+        return dir
     }
 
-    private func createAndGetDownloadsDir(for studentName: String) -> URL {
-        let dir = getDownloadsDirURL(for: studentName)
+    private func createAndGetDownloadsDir(for studentName: String, subjectName: String? = nil) -> URL {
+        let (baseDir, isScoped) = getBaseDirURLAndStartAccess()
+        let safeStudentName = sanitizedDirectoryName(from: studentName)
+        var dir = baseDir.appendingPathComponent(safeStudentName)
+        if let subject = subjectName {
+            let safeSubjectName = sanitizedDirectoryName(from: subject)
+            dir = dir.appendingPathComponent(safeSubjectName)
+        }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        if isScoped {
+            baseDir.stopAccessingSecurityScopedResource()
+        }
         return dir
     }
 
@@ -404,14 +470,22 @@ class DownloadManager: ObservableObject {
         return files
     }
 
-    private func downloadFiles(_ files: [(name: String, url: URL)], to dir: URL, progressKey: String?, nidAut: String, nidSes: String) async -> DownloadAttemptResult {
+    private func downloadFiles(_ files: [(name: String, url: URL)], to dir: URL, progressKey: String?, articleId: String?, nidAut: String, nidSes: String) async -> DownloadAttemptResult {
         if let key = progressKey {
             statusByArticle[key] = .downloading(progress: 0)
+        }
+
+        let (baseDir, isScoped) = getBaseDirURLAndStartAccess()
+        defer {
+            if isScoped {
+                baseDir.stopAccessingSecurityScopedResource()
+            }
         }
 
         let total = files.count
         var successCount = 0
         var lastErrorMessage: String?
+        var downloadedFiles: [String] = []
         
         let allCookies = await fetchAllCookies()
         var cookieValues = ["NID_AUT=\(nidAut)", "NID_SES=\(nidSes)"]
@@ -457,6 +531,7 @@ class DownloadManager: ObservableObject {
                 let finalURL = uniqueURL(for: destURL)
                 try FileManager.default.moveItem(at: tempURL, to: finalURL)
                 successCount += 1
+                downloadedFiles.append(finalURL.lastPathComponent)
 
                 let progress = Double(idx + 1) / Double(total)
                 if let key = progressKey {
@@ -469,10 +544,19 @@ class DownloadManager: ObservableObject {
 
         if let key = progressKey {
             statusByArticle[key] = successCount > 0 ? .done(count: successCount) : .error(lastErrorMessage ?? "다운로드 실패")
-            if successCount > 0 { NSWorkspace.shared.open(dir) }
+            if successCount > 0 {
+                let shouldOpen = UserDefaults.standard.object(forKey: "openFinderOnDownload") as? Bool ?? true
+                if shouldOpen {
+                    NSWorkspace.shared.open(dir)
+                }
+            }
         }
 
-        return DownloadAttemptResult(successCount: successCount, lastErrorMessage: lastErrorMessage)
+        if successCount > 0, let artId = articleId {
+            updateLocalHistoryFile(in: dir, articleId: artId, filenames: downloadedFiles)
+        }
+
+        return DownloadAttemptResult(successCount: successCount, lastErrorMessage: lastErrorMessage, downloadedFiles: downloadedFiles)
     }
     
     private func fetchAllCookies() async -> [HTTPCookie] {
@@ -498,6 +582,70 @@ class DownloadManager: ObservableObject {
             counter += 1
         } while FileManager.default.fileExists(atPath: candidate.path)
         return candidate
+    }
+
+    private func updateLocalHistoryFile(in dir: URL, articleId: String, filenames: [String]) {
+        let historyFileURL = dir.appendingPathComponent(".kas_download_history.json")
+        var history: [String: [String]] = [:]
+        
+        if FileManager.default.fileExists(atPath: historyFileURL.path) {
+            if let data = try? Data(contentsOf: historyFileURL),
+               let parsed = try? JSONDecoder().decode([String: [String]].self, from: data) {
+                history = parsed
+            }
+        }
+        
+        history[articleId] = filenames
+        
+        if let data = try? JSONEncoder().encode(history) {
+            try? data.write(to: historyFileURL)
+        }
+    }
+
+    func scanAndSyncDownloadHistory() -> Int {
+        let (baseDir, isScoped) = getBaseDirURLAndStartAccess()
+        defer {
+            if isScoped {
+                baseDir.stopAccessingSecurityScopedResource()
+            }
+        }
+        
+        var syncCount = 0
+        do {
+            guard FileManager.default.fileExists(atPath: baseDir.path) else { return 0 }
+            
+            let contents = try FileManager.default.contentsOfDirectory(at: baseDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+            for folderURL in contents {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: folderURL.path, isDirectory: &isDir), isDir.boolValue {
+                    // Level 2: Scan subject folders under student folders
+                    let subjectContents = try? FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])
+                    for subjectURL in subjectContents ?? [] {
+                        var isSubjectDir: ObjCBool = false
+                        if FileManager.default.fileExists(atPath: subjectURL.path, isDirectory: &isSubjectDir), isSubjectDir.boolValue {
+                            let historyFileURL = subjectURL.appendingPathComponent(".kas_download_history.json")
+                            if FileManager.default.fileExists(atPath: historyFileURL.path) {
+                                if let data = try? Data(contentsOf: historyFileURL),
+                                   let parsed = try? JSONDecoder().decode([String: [String]].self, from: data) {
+                                    for (artId, filenames) in parsed {
+                                        self.downloadedArticleIds.insert(artId)
+                                        self.downloadedFilesMap[artId] = filenames
+                                        syncCount += 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if syncCount > 0 {
+                self.saveDownloadedIds()
+                self.saveDownloadedFilesMap()
+            }
+        } catch {
+            print("Failed to scan directory: \(error)")
+        }
+        return syncCount
     }
 
     private func sanitizedDirectoryName(from name: String) -> String {
