@@ -13,9 +13,11 @@ struct ArticleRowView: View {
     let nidAut: String
     let nidSes: String
     
+    @State private var isHovered = false
+    
     var body: some View {
         if let url = URL(string: article.link) {
-            HStack(alignment: .top, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
                 Link(destination: url) {
                     VStack(alignment: .leading, spacing: 8) {
                         Text(cleanHTML(article.title))
@@ -95,19 +97,26 @@ struct ArticleRowView: View {
                         }
                         .buttonStyle(.plain)
                     case .downloading(let p):
-                        VStack(spacing: 2) {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.blue.opacity(0.2), lineWidth: 3)
+                            Circle()
+                                .trim(from: 0, to: CGFloat(p))
+                                .stroke(Color.blue, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                                .rotationEffect(.degrees(-90))
+                                .animation(.linear, value: p)
+                            
                             Button {
                                 downloadManager.cancelArticle(link: article.link)
                             } label: {
                                 Image(systemName: "stop.fill")
+                                    .resizable()
+                                    .frame(width: 8, height: 8)
                                     .foregroundStyle(.red)
-                                    .font(.caption)
                             }
                             .buttonStyle(.plain)
-                            Text(String(format: "%.0f%%", p * 100))
-                                .font(.system(size: 8))
-                                .foregroundStyle(.secondary)
                         }
+                        .frame(width: 24, height: 24)
                     case .done:
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundStyle(.green)
@@ -126,6 +135,19 @@ struct ArticleRowView: View {
                 }
                 .frame(width: 34)
             }
+            .padding()
+            .background(
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color(NSColor.controlBackgroundColor))
+                    .shadow(color: Color.black.opacity(isHovered ? 0.15 : 0.05), radius: isHovered ? 8 : 4, x: 0, y: isHovered ? 4 : 2)
+            )
+            .scaleEffect(isHovered ? 1.01 : 1.0)
+            .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isHovered)
+            .onHover { hover in
+                isHovered = hover
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 4)
         }
     }
     

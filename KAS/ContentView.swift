@@ -65,6 +65,10 @@ struct ContentView: View {
     
     @State private var isShowingLoginSheet = false
     @State private var selectedMenuId: String? = nil
+    
+    // Toast State
+    @State private var showToast = false
+    @State private var toastMessage = ""
 
     var trimmedUserName: String {
         userName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -96,8 +100,9 @@ struct ContentView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 20) {
+        ZStack(alignment: .bottom) {
+            NavigationStack {
+                VStack(spacing: 20) {
                 Image("logo")
                     .resizable()
                     .scaledToFit()
@@ -176,9 +181,9 @@ struct ContentView: View {
                     }
                 }
 
-                Text("이름을 입력하면 해당 학생의 최근 과제 제출글을 검색합니다")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+//                Text("이름을 입력하면 해당 학생의 최근 과제 제출글을 검색합니다")
+//                    .font(.caption)
+//                    .foregroundStyle(.secondary)
 
                 Button {
                     addRecentSearch(trimmedUserName)
@@ -325,20 +330,40 @@ struct ContentView: View {
                     }
                 }
 
-                List(filteredSearchResults) { article in
-                    let menuName = searchViewModel.menuIdMap[article.menuId ?? ""] ?? "게시판 \(article.menuId ?? "")"
-                    ArticleRowView(
-                        article: article,
-                        menuName: menuName,
-                        downloadManager: downloadManager,
-                        studentName: trimmedUserName,
-                        nidAut: nidAut,
-                        nidSes: nidSes
-                    )
+                if searchViewModel.searchResults.isEmpty && !searchViewModel.isLoading && searchViewModel.errorMessage.isEmpty {
+                    Spacer()
+                    VStack(spacing: 16) {
+                        Image(systemName: "folder.magnifyingglass")
+                            .font(.system(size: 64))
+                            .foregroundStyle(.blue.opacity(0.4))
+                        Text("학생 이름을 검색하여 과제를 확인하세요")
+                            .font(.headline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.bottom, 80)
+                    Spacer()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 8) {
+                            ForEach(filteredSearchResults) { article in
+                                let menuName = searchViewModel.menuIdMap[article.menuId ?? ""] ?? "게시판 \(article.menuId ?? "")"
+                                ArticleRowView(
+                                    article: article,
+                                    menuName: menuName,
+                                    downloadManager: downloadManager,
+                                    studentName: trimmedUserName,
+                                    nidAut: nidAut,
+                                    nidSes: nidSes
+                                )
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 4)
+                    }
                 }
-                .listStyle(.plain)
             }
             .padding()
+            .background(.ultraThinMaterial)
             .navigationTitle("KAS")
             .onAppear {
                 searchViewModel.loadCafeMenuNames()
@@ -379,6 +404,39 @@ struct ContentView: View {
                 }
                 .frame(minWidth: 450, minHeight: 650)
             }
+        }
+        .onChange(of: downloadManager.batchStatus) { newStatus in
+            if case .done(let count) = newStatus {
+                showToastMessage("\(count)개 과제 일괄 다운로드 완료!")
+            }
+        }
+        .overlay(
+            VStack {
+                Spacer()
+                if showToast {
+                    Text(toastMessage)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 24)
+                        .padding(.vertical, 12)
+                        .background(Color.blue.opacity(0.9))
+                        .clipShape(Capsule())
+                        .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                        .padding(.bottom, 30)
+                }
+            }
+            .animation(.spring(response: 0.4, dampingFraction: 0.7), value: showToast)
+        )
+        }
+    }
+
+    private func showToastMessage(_ message: String) {
+        toastMessage = message
+        withAnimation { showToast = true }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            withAnimation { showToast = false }
         }
     }
 
