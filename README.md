@@ -71,7 +71,7 @@
 
 ## 📥 다운로드
 
-> **최신 릴리스**: [GitHub Releases 페이지에서 다운로드](https://github.com/YOUR_USERNAME/KAS/releases)  
+> **최신 릴리스**: [GitHub Releases 페이지에서 다운로드](https://github.com/nowkiscode/KAS/releases)  
 > *(다운로드 링크는 추후 업데이트 예정)*
 
 ---
