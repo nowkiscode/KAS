@@ -177,3 +177,96 @@ class SearchViewModel: ObservableObject {
         }
     }
 }
+
+// MARK: - Board Articles Model & ViewModel
+
+struct CafeBoardArticle: Identifiable, Codable, Equatable {
+    var id: Int { articleId }
+    let articleId: Int
+    let refArticleId: Int?
+    let menuId: Int
+    let subject: String
+    let writerNickname: String?
+    let replyArticle: Bool?
+    let readCount: Int?
+    let writeDateTimestamp: Int64?
+    let replyListOrder: String?
+    
+    var link: String {
+        return "\(NaverCafeConfig.desktopCafeURL)/\(articleId)"
+    }
+}
+
+@MainActor
+class BoardArticlesViewModel: ObservableObject {
+    @Published var articles: [CafeBoardArticle] = []
+    @Published var isLoading = false
+    @Published var errorMessage = ""
+    
+    private var currentPage = 1
+    private var hasMorePages = true
+    private var currentMenuId: String? = nil
+    
+    func fetchArticles(for menuId: String) {
+        currentMenuId = menuId
+        currentPage = 1
+        hasMorePages = true
+        articles = []
+        loadData()
+    }
+    
+    func loadMore() {
+        guard !isLoading, hasMorePages else { return }
+        currentPage += 1
+        loadData()
+    }
+    
+    private func loadData() {
+        guard let menuId = currentMenuId else { return }
+        
+        isLoading = true
+        errorMessage = ""
+        
+        Task {
+            do {
+                let urlString = "https://apis.naver.com/cafe-web/cafe2/ArticleListV2dot1.json?search.clubid=\(NaverCafeConfig.cafeId)&search.menuid=\(menuId)&search.page=\(currentPage)&search.perPage=50"
+                guard let url = URL(string: urlString) else { throw URLError(.badURL) }
+                
+                var request = URLRequest(url: url)
+                request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)", forHTTPHeaderField: "User-Agent")
+                request.setValue(NaverCafeConfig.mobileCafeURL, forHTTPHeaderField: "Referer")
+                request.setValue("mobile", forHTTPHeaderField: "X-Cafe-Product")
+                
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                    throw URLError(.badServerResponse)
+                }
+                
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let message = json["message"] as? [String: Any],
+                   let result = message["result"] as? [String: Any] {
+                    
+                    var newArticles = [CafeBoardArticle]()
+                    
+                    if let articleList = result["articleList"] as? [[String: Any]] {
+                        let dataToDecode = try JSONSerialization.data(withJSONObject: articleList)
+                        if let decodedArticles = try? JSONDecoder().decode([CafeBoardArticle].self, from: dataToDecode) {
+                            newArticles.append(contentsOf: decodedArticles)
+                        }
+                    }
+                    
+                    if newArticles.isEmpty {
+                        self.hasMorePages = false
+                    } else {
+                        self.articles.append(contentsOf: newArticles)
+                    }
+                } else {
+                    self.errorMessage = "게시글 목록을 불러올 수 없습니다."
+                }
+            } catch {
+                self.errorMessage = "네트워크 오류: \(error.localizedDescription)"
+            }
+            self.isLoading = false
+        }
+    }
+}

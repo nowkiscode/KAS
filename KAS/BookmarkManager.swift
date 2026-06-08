@@ -54,3 +54,51 @@ class BookmarkManager: ObservableObject {
         }
     }
 }
+
+// MARK: - Board Bookmark
+
+struct BoardBookmark: Identifiable, Codable, Equatable {
+    var id = UUID()
+    let menuId: String
+    let menuName: String
+    var dateAdded: Date
+}
+
+@MainActor
+class BoardBookmarkManager: ObservableObject {
+    static let shared = BoardBookmarkManager()
+    
+    @Published var bookmarks: [BoardBookmark] = []
+    
+    private let userDefaultsKey = "savedBoardBookmarks"
+    
+    private init() {
+        loadBookmarks()
+    }
+    
+    func loadBookmarks() {
+        if let data = UserDefaults.standard.data(forKey: userDefaultsKey),
+           let decoded = try? JSONDecoder().decode([BoardBookmark].self, from: data) {
+            self.bookmarks = decoded
+        }
+    }
+    
+    func saveBookmarks() {
+        if let encoded = try? JSONEncoder().encode(bookmarks) {
+            UserDefaults.standard.set(encoded, forKey: userDefaultsKey)
+        }
+    }
+    
+    func addBookmark(menuId: String, menuName: String) {
+        if !bookmarks.contains(where: { $0.menuId == menuId }) {
+            let newBookmark = BoardBookmark(menuId: menuId, menuName: menuName, dateAdded: Date())
+            bookmarks.append(newBookmark)
+            saveBookmarks()
+        }
+    }
+    
+    func removeBookmark(menuId: String) {
+        bookmarks.removeAll { $0.menuId == menuId }
+        saveBookmarks()
+    }
+}

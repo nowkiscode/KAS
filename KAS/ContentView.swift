@@ -150,6 +150,7 @@ struct ContentView: View {
                     Picker("", selection: $selectedTab) {
                         Label("검색", systemImage: "magnifyingglass").tag(0)
                         Label("즐겨찾기", systemImage: "star.fill").tag(1)
+                        Label("게시판", systemImage: "list.bullet.rectangle.portrait").tag(2)
                     }
                     .pickerStyle(.segmented)
                     .padding(.horizontal)
@@ -158,8 +159,11 @@ struct ContentView: View {
 
                     if selectedTab == 0 {
                         searchTabContent
-                    } else {
+                    } else if selectedTab == 1 {
                         bookmarkTabContent
+                    } else {
+                        BoardBookmarkListView()
+                            .environmentObject(searchViewModel)
                     }
                 }
                 .background(.ultraThinMaterial)
@@ -872,5 +876,221 @@ struct SettingsView: View {
                 print("Failed to save bookmark: \(error)")
             }
         }
+    }
+}
+
+// MARK: - Board Bookmark & Article Views
+
+struct BoardBookmarkListView: View {
+    @StateObject private var manager = BoardBookmarkManager.shared
+    @EnvironmentObject var searchVM: SearchViewModel
+    @State private var showingAddAlert = false
+    @State private var newBoardLink = ""
+    @State private var alertMessage = ""
+    @State private var showingError = false
+    
+    var body: some View {
+        NavigationStack {
+            List {
+                if manager.bookmarks.isEmpty {
+                    VStack(alignment: .center, spacing: 12) {
+                        Image(systemName: "folder.badge.plus")
+                            .font(.system(size: 40))
+                            .foregroundColor(.gray)
+                        Text("즐겨찾기한 게시판이 없습니다.\n우측 상단의 + 버튼을 눌러 추가해보세요.")
+                            .multilineTextAlignment(.center)
+                            .foregroundColor(.gray)
+                            .font(.callout)
+                    }
+                    .padding(.vertical, 40)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                } else {
+                    ForEach(manager.bookmarks) { bookmark in
+                        NavigationLink(destination: BoardArticlesView(menuId: bookmark.menuId, menuName: bookmark.menuName)) {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text(bookmark.menuName)
+                                    .font(.headline)
+                                Text("게시판 ID: \(bookmark.menuId)")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .onDelete(perform: deleteBookmark)
+                }
+            }
+            .navigationTitle("게시판 즐겨찾기")
+            .toolbar {
+                ToolbarItem(placement: .automatic) {
+                    Button(action: {
+                        newBoardLink = ""
+                        showingAddAlert = true
+                    }) {
+                        Image(systemName: "plus")
+                    }
+                }
+            }
+            .alert("게시판 추가", isPresented: $showingAddAlert) {
+                TextField("네이버 카페 게시판 링크", text: $newBoardLink)
+                Button("취소", role: .cancel) { }
+                Button("추가") {
+                    addBoardFromLink()
+                }
+            } message: {
+                Text("게시판 URL을 붙여넣어 주세요.")
+            }
+            .alert("오류", isPresented: $showingError) {
+                Button("확인", role: .cancel) {}
+            } message: {
+                Text(alertMessage)
+            }
+        }
+    }
+    
+    private func deleteBookmark(at offsets: IndexSet) {
+        let itemsToDelete = offsets.map { manager.bookmarks[$0] }
+        for item in itemsToDelete {
+            manager.removeBookmark(menuId: item.menuId)
+        }
+    }
+    
+    private func addBoardFromLink() {
+        let pattern = "menuid=(\\d+)|menus?/(\\d+)"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return }
+        
+        let nsRange = NSRange(newBoardLink.startIndex..<newBoardLink.endIndex, in: newBoardLink)
+        if let match = regex.firstMatch(in: newBoardLink, options: [], range: nsRange) {
+            var extractedId = ""
+            if let range1 = Range(match.range(at: 1), in: newBoardLink) {
+                extractedId = String(newBoardLink[range1])
+            } else if match.numberOfRanges > 2, let range2 = Range(match.range(at: 2), in: newBoardLink) {
+                extractedId = String(newBoardLink[range2])
+            }
+            
+            if !extractedId.isEmpty {
+                let name = searchVM.menuIdMap[extractedId] ?? "게시판 \(extractedId)"
+                manager.addBookmark(menuId: extractedId, menuName: name)
+                return
+            }
+        }
+        
+        alertMessage = "유효한 게시판 링크를 찾을 수 없습니다."
+        showingError = true
+    }
+}
+
+struct BoardArticlesView: View {
+    let menuId: String
+    let menuName: String
+    @StateObject private var viewModel = BoardArticlesViewModel()
+    
+    var body: some View {
+        VStack {
+            if viewModel.isLoading && viewModel.articles.isEmpty {
+                ProgressView("게시글 불러오는 중...")
+                    .padding()
+            } else if !viewModel.errorMessage.isEmpty && viewModel.articles.isEmpty {
+                Text(viewModel.errorMessage)
+                    .foregroundColor(.red)
+                    .padding()
+            } else {
+                List {
+                    ForEach(viewModel.articles) { article in
+                        BoardArticleRowView(article: article)
+                            .padding(.vertical, 4)
+                            .onAppear {
+                                if article.id == viewModel.articles.last?.id {
+                                    viewModel.loadMore()
+                                }
+                            }
+                    }
+                    
+                    if viewModel.isLoading && !viewModel.articles.isEmpty {
+                        HStack {
+                            Spacer()
+                            ProgressView()
+                            Spacer()
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle(menuName)
+        .onAppear {
+            if viewModel.articles.isEmpty {
+                viewModel.fetchArticles(for: menuId)
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .automatic) {
+                Button(action: {
+                    viewModel.fetchArticles(for: menuId)
+                }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+            }
+        }
+    }
+}
+
+struct BoardArticleRowView: View {
+    let article: CafeBoardArticle
+    
+    private var isProfessor: Bool {
+        article.writerNickname?.contains("교수") == true
+    }
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            if article.replyArticle == true || (article.replyListOrder != nil && article.replyListOrder != "") {
+                Image(systemName: "arrow.turn.down.right")
+                    .foregroundColor(.gray)
+                    .padding(.leading, 16)
+                    .padding(.top, 2)
+            }
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(article.subject)
+                    .font(.body)
+                    .fontWeight(isProfessor ? .semibold : .medium)
+                    .foregroundColor(isProfessor ? .blue : .primary)
+                    .lineLimit(2)
+                
+                HStack(spacing: 12) {
+                    if let writer = article.writerNickname {
+                        Label(writer, systemImage: "person.fill")
+                            .foregroundColor(isProfessor ? .blue : .secondary)
+                    }
+                    
+                    if let ts = article.writeDateTimestamp {
+                        let date = Date(timeIntervalSince1970: TimeInterval(ts) / 1000.0)
+                        Label(formatDate(date), systemImage: "clock")
+                    }
+                    
+                    if let reads = article.readCount {
+                        Label("\(reads)", systemImage: "eye")
+                    }
+                }
+                .font(.caption)
+                .foregroundColor(isProfessor ? .primary.opacity(0.8) : .secondary)
+            }
+            
+            Spacer()
+        }
+        .padding(.vertical, 4)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if let url = URL(string: article.link) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+    
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy.MM.dd HH:mm"
+        return formatter.string(from: date)
     }
 }
